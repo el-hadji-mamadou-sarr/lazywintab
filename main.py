@@ -153,19 +153,69 @@ def _get_last_visible_popup(hwnd: int) -> int:
     return hwnd
 
 
-def enumerate_windows() -> list[tuple[int, str]]:
-    """Return a list of (hwnd, title) for all Alt-Tab eligible windows."""
-    results: list[tuple[int, str]] = []
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+_psapi = ctypes.WinDLL("psapi")
+_psapi.GetModuleBaseNameW.argtypes = [wintypes.HANDLE, wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+_psapi.GetModuleBaseNameW.restype = wintypes.DWORD
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_VM_READ = 0x0010
+
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+
+def _get_process_name(hwnd: int) -> str:
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, byref(pid))
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, False, pid.value)
+    if not handle:
+        return ""
+    buf = ctypes.create_unicode_buffer(260)
+    _psapi.GetModuleBaseNameW(handle, None, buf, 260)
+    kernel32.CloseHandle(handle)
+    # Strip .exe suffix
+    name = buf.value
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    return name
+
+
+def enumerate_windows() -> list[tuple[int, str, str]]:
+    """Return (hwnd, title, process_name) for all Alt-Tab eligible windows, in MRU order."""
+    results: list[tuple[int, str, str]] = []
 
     @ENUMWINDOWSPROC
     def callback(hwnd, _lparam):
         if _is_alt_tab_window(hwnd):
             title = _get_window_text(hwnd)
-            results.append((hwnd, title))
+            proc = _get_process_name(hwnd)
+            results.append((hwnd, title, proc))
         return True
 
     user32.EnumWindows(callback, 0)
     return results
+
+
+def group_windows(windows: list[tuple[int, str, str]]) -> list[tuple[int, str, str]]:
+    """Group windows by process name, preserving MRU order of the first window per group."""
+    # EnumWindows returns Z-order (MRU first)
+    seen: dict[str, list] = {}
+    for entry in windows:
+        key = entry[2].lower()  # process name
+        seen.setdefault(key, []).append(entry)
+
+    # Rebuild: for each group in order of first appearance, emit all its windows
+    ordered: list[tuple[int, str, str]] = []
+    emitted: set[str] = set()
+    for entry in windows:
+        key = entry[2].lower()
+        if key not in emitted:
+            emitted.add(key)
+            ordered.extend(seen[key])
+    return ordered
 
 
 def get_window_icon(hwnd: int, size: int = 32) -> QPixmap | None:
@@ -326,23 +376,22 @@ WINDOW_WIDTH = 480
 
 import re as _re
 
-def _format_title(raw_title: str) -> str:
-    """Return '<App Name> - <window title>' with VSCode project name handling."""
-    # VSCode: title is like "file.py - project - Visual Studio Code"
-    # We want "Visual Studio Code - project"
+def _format_title(raw_title: str, proc: str) -> str:
+    """Return '<App> — <doc title>'."""
+    # VSCode: "file.py - project - Visual Studio Code" → "Visual Studio Code — project"
     vscode_match = _re.match(r"^.+ - (.+) - Visual Studio Code.*$", raw_title)
     if vscode_match:
-        project = vscode_match.group(1).strip()
-        return f"Visual Studio Code — {project}"
+        return f"Visual Studio Code — {vscode_match.group(1).strip()}"
 
-    # Generic: "something - AppName" or just "AppName"
-    # Try to split on last " - " to get app name from the end
+    # Generic: split on last " - " to separate doc from app name
     parts = raw_title.rsplit(" - ", 1)
     if len(parts) == 2:
         doc, app = parts[0].strip(), parts[1].strip()
         return f"{app} — {doc}"
 
-    return raw_title
+    # Fallback: use process name + full title
+    app = proc if proc else raw_title
+    return f"{app} — {raw_title}" if proc and proc.lower() not in raw_title.lower() else raw_title
 
 
 class WindowItemWidget(QWidget):
@@ -365,7 +414,7 @@ class SwitcherWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._windows: list[tuple[int, str]] = []
+        self._windows: list[tuple[int, str, str]] = []
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(30)
         self._poll_timer.timeout.connect(self._poll_alt_release)
@@ -453,21 +502,20 @@ class SwitcherWindow(QWidget):
 
     def _populate_and_show(self) -> None:
         """Enumerate windows, populate the list, and show the switcher."""
-        self._windows = enumerate_windows()
-        # Filter out our own window
         my_hwnd = int(self.winId())
-        self._windows = [(h, t) for h, t in self._windows if h != my_hwnd]
+        raw = [(h, t, p) for h, t, p in enumerate_windows() if h != my_hwnd]
+        self._windows = group_windows(raw)
 
         if not self._windows:
             log.info("No windows to switch to.")
             return
 
         self._list.clear()
-        for hwnd, title in self._windows:
+        for hwnd, title, proc in self._windows:
             item = QListWidgetItem()
             item.setSizeHint(QSize(WINDOW_WIDTH - 20, ITEM_HEIGHT))
             self._list.addItem(item)
-            widget = WindowItemWidget(_format_title(title))
+            widget = WindowItemWidget(_format_title(title, proc))
             self._list.setItemWidget(item, widget)
 
         # Select the second item (first is usually the current window)
