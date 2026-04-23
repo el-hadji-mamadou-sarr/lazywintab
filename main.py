@@ -330,83 +330,96 @@ def switch_to_window(hwnd: int) -> None:
 
 STYLESHEET = """
 QWidget#SwitcherBackground {
-    background-color: rgba(30, 30, 30, 240);
-    border: 1px solid rgba(80, 80, 80, 200);
-    border-radius: 12px;
+    background-color: rgba(22, 22, 28, 252);
+    border: 1px solid rgba(255, 255, 255, 18);
+    border-radius: 16px;
 }
 
 QListWidget {
     background: transparent;
     border: none;
     outline: none;
-    padding: 4px;
+    padding: 6px 8px;
 }
 
 QListWidget::item {
     background: transparent;
-    border-radius: 8px;
-    padding: 8px 12px;
-    margin: 2px 4px;
-    color: #e0e0e0;
+    border-radius: 10px;
+    margin: 1px 0px;
+    color: #e8e8e8;
 }
 
 QListWidget::item:selected {
-    background-color: rgba(60, 120, 200, 180);
-    color: #ffffff;
+    background-color: rgba(120, 80, 220, 160);
 }
 
-QListWidget::item:hover {
-    background-color: rgba(70, 70, 70, 150);
+QListWidget::item:hover:!selected {
+    background-color: rgba(255, 255, 255, 12);
 }
 
-QListWidget::item:selected:hover {
-    background-color: rgba(60, 120, 200, 200);
-}
-
-QLabel#Title {
-    color: rgba(180, 180, 180, 220);
-    font-size: 11px;
-    padding: 6px 12px 2px 12px;
+QLabel#Header {
+    color: rgba(160, 160, 170, 180);
+    font-size: 10px;
+    letter-spacing: 1px;
+    padding: 10px 16px 4px 16px;
 }
 """
 
-ITEM_HEIGHT = 52
-MAX_VISIBLE_ITEMS = 12
-WINDOW_WIDTH = 480
+ITEM_HEIGHT = 62
+MAX_VISIBLE_ITEMS = 10
+WINDOW_WIDTH = 500
 
 import re as _re
 
-def _format_title(raw_title: str, proc: str) -> str:
-    """Return '<App> — <doc title>'."""
-    # VSCode: "file.py - project - Visual Studio Code" → "Visual Studio Code — project"
-    vscode_match = _re.match(r"^.+ - (.+) - Visual Studio Code.*$", raw_title)
+def _format_title(raw_title: str, proc: str) -> tuple[str, str]:
+    """Return (app_name, doc_title) for two-line display."""
+    # VSCode: "file.py - project - Visual Studio Code"
+    vscode_match = _re.match(r"^.+ - (.+?) ?(\[.*?\])? - Visual Studio Code.*$", raw_title)
     if vscode_match:
-        return f"Visual Studio Code — {vscode_match.group(1).strip()}"
+        return "Visual Studio Code", vscode_match.group(1).strip()
 
-    # Generic: split on last " - " to separate doc from app name
+    # Generic: "doc - App Name"
     parts = raw_title.rsplit(" - ", 1)
     if len(parts) == 2:
-        doc, app = parts[0].strip(), parts[1].strip()
-        return f"{app} — {doc}"
+        return parts[1].strip(), parts[0].strip()
 
-    # Fallback: use process name + full title
-    app = proc if proc else raw_title
-    return f"{app} — {raw_title}" if proc and proc.lower() not in raw_title.lower() else raw_title
+    # Fallback
+    return proc if proc else raw_title, ""
 
 
 class WindowItemWidget(QWidget):
-    """Text-only list item: <App> — <title>."""
+    """Two-line list item: bold app name + dimmer doc title."""
 
-    def __init__(self, display_text: str, parent=None):
+    def __init__(self, app: str, doc: str, parent=None):
         super().__init__(parent)
+        from PyQt6.QtWidgets import QVBoxLayout as _VBox
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(0)
 
-        label = QLabel(display_text)
-        label.setFont(QFont("Segoe UI", 11))
-        label.setStyleSheet("color: #e0e0e0; background: transparent;")
-        label.setWordWrap(False)
-        layout.addWidget(label, 1)
+        text_col = _VBox()
+        text_col.setSpacing(2)
+
+        is_vscode = app == "Visual Studio Code"
+        app_color = "#4fc3f7" if is_vscode else "#f0f0f0"
+        app_size = 13 if is_vscode else 11
+
+        app_label = QLabel(app)
+        app_label.setFont(QFont("Segoe UI", app_size, QFont.Weight.DemiBold))
+        app_label.setStyleSheet(f"color: {app_color}; background: transparent;")
+        app_label.setWordWrap(False)
+        text_col.addWidget(app_label)
+
+        if doc:
+            doc_color = "#80cbc4" if is_vscode else "rgba(180, 180, 190, 200)"
+            doc_size = 10 if is_vscode else 9
+            doc_label = QLabel(doc)
+            doc_label.setFont(QFont("Segoe UI", doc_size))
+            doc_label.setStyleSheet(f"color: {doc_color}; background: transparent;")
+            doc_label.setWordWrap(False)
+            text_col.addWidget(doc_label)
+
+        layout.addLayout(text_col, 1)
 
 
 class SwitcherWindow(QWidget):
@@ -441,8 +454,8 @@ class SwitcherWindow(QWidget):
         inner.setContentsMargins(6, 6, 6, 6)
         inner.setSpacing(0)
 
-        header = QLabel("Switch to")
-        header.setObjectName("Title")
+        header = QLabel("SWITCH TO")
+        header.setObjectName("Header")
         inner.addWidget(header)
 
         self._list = QListWidget()
@@ -471,7 +484,20 @@ class SwitcherWindow(QWidget):
         VK_RETURN = 0x0D
         VK_ESCAPE = 0x1B
 
+        WM_KEYUP = 0x0101
+        WM_SYSKEYUP = 0x0105
+
         def _hook_proc(nCode, wParam, lParam):
+            if nCode >= 0:
+                kb = ctypes.cast(lParam, ctypes.POINTER(wintypes.KBDLLHOOKSTRUCT)).contents
+                vk = kb.vkCode
+
+                # Alt key released while switcher is open → commit selection
+                if wParam in (WM_KEYUP, WM_SYSKEYUP) and vk in (VK_MENU, VK_LMENU, VK_RMENU):
+                    if self.isVisible():
+                        QTimer.singleShot(0, lambda: self._dismiss(switch=True))
+                    return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+
             if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 kb = ctypes.cast(lParam, ctypes.POINTER(wintypes.KBDLLHOOKSTRUCT)).contents
                 vk = kb.vkCode
@@ -540,10 +566,11 @@ class SwitcherWindow(QWidget):
 
         self._list.clear()
         for hwnd, title, proc in self._windows:
+            app, doc = _format_title(title, proc)
             item = QListWidgetItem()
             item.setSizeHint(QSize(WINDOW_WIDTH - 20, ITEM_HEIGHT))
             self._list.addItem(item)
-            widget = WindowItemWidget(_format_title(title, proc))
+            widget = WindowItemWidget(app, doc)
             self._list.setItemWidget(item, widget)
 
         # Select the second item (first is usually the current window)
@@ -567,8 +594,8 @@ class SwitcherWindow(QWidget):
         self.activateWindow()
         self.raise_()
 
-        # Start polling for Alt key release
-        self._poll_timer.start()
+        # Delay poll start to avoid false Alt-release detection right after hook fires
+        QTimer.singleShot(200, self._poll_timer.start)
         log.info("Switcher shown with %d windows.", len(self._windows))
 
     def _dismiss(self, switch: bool = True) -> None:
