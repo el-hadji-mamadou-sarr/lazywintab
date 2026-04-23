@@ -320,39 +320,44 @@ QLabel#Title {
 }
 """
 
-ITEM_HEIGHT = 48
+ITEM_HEIGHT = 52
 MAX_VISIBLE_ITEMS = 12
-WINDOW_WIDTH = 420
+WINDOW_WIDTH = 480
+
+import re as _re
+
+def _format_title(raw_title: str) -> str:
+    """Return '<App Name> - <window title>' with VSCode project name handling."""
+    # VSCode: title is like "file.py - project - Visual Studio Code"
+    # We want "Visual Studio Code - project"
+    vscode_match = _re.match(r"^.+ - (.+) - Visual Studio Code.*$", raw_title)
+    if vscode_match:
+        project = vscode_match.group(1).strip()
+        return f"Visual Studio Code — {project}"
+
+    # Generic: "something - AppName" or just "AppName"
+    # Try to split on last " - " to get app name from the end
+    parts = raw_title.rsplit(" - ", 1)
+    if len(parts) == 2:
+        doc, app = parts[0].strip(), parts[1].strip()
+        return f"{app} — {doc}"
+
+    return raw_title
 
 
 class WindowItemWidget(QWidget):
-    """Custom widget rendered for each list item (icon + title)."""
+    """Text-only list item: <App> — <title>."""
 
-    def __init__(self, title: str, icon_pixmap: QPixmap | None, parent=None):
+    def __init__(self, display_text: str, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 8, 12, 8)
 
-        icon_label = QLabel()
-        if icon_pixmap and not icon_pixmap.isNull():
-            icon_label.setPixmap(icon_pixmap.scaled(
-                28, 28, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ))
-        else:
-            # Fallback: draw a simple colored square
-            pm = QPixmap(28, 28)
-            pm.fill(QColor(100, 100, 100))
-            icon_label.setPixmap(pm)
-        icon_label.setFixedSize(28, 28)
-        layout.addWidget(icon_label)
-
-        title_label = QLabel(title)
-        title_label.setFont(QFont("Segoe UI", 11))
-        title_label.setStyleSheet("color: #e0e0e0; background: transparent;")
-        title_label.setWordWrap(False)
-        layout.addWidget(title_label, 1)
+        label = QLabel(display_text)
+        label.setFont(QFont("Segoe UI", 11))
+        label.setStyleSheet("color: #e0e0e0; background: transparent;")
+        label.setWordWrap(False)
+        layout.addWidget(label, 1)
 
 
 class SwitcherWindow(QWidget):
@@ -459,11 +464,10 @@ class SwitcherWindow(QWidget):
 
         self._list.clear()
         for hwnd, title in self._windows:
-            icon_pm = get_window_icon(hwnd, 32)
             item = QListWidgetItem()
             item.setSizeHint(QSize(WINDOW_WIDTH - 20, ITEM_HEIGHT))
             self._list.addItem(item)
-            widget = WindowItemWidget(title, icon_pm)
+            widget = WindowItemWidget(_format_title(title))
             self._list.setItemWidget(item, widget)
 
         # Select the second item (first is usually the current window)
