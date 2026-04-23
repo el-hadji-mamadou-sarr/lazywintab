@@ -466,15 +466,39 @@ class SwitcherWindow(QWidget):
         """Install a WH_KEYBOARD_LL hook to intercept Alt+Tab."""
         HOOKPROC = WINFUNCTYPE(ctypes.c_long, c_int, wintypes.WPARAM, wintypes.LPARAM)
 
+        VK_UP = 0x26
+        VK_DOWN = 0x28
+        VK_RETURN = 0x0D
+        VK_ESCAPE = 0x1B
+
         def _hook_proc(nCode, wParam, lParam):
             if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 kb = ctypes.cast(lParam, ctypes.POINTER(wintypes.KBDLLHOOKSTRUCT)).contents
-                if kb.vkCode == VK_TAB:
-                    alt_down = bool(user32.GetAsyncKeyState(VK_MENU) & 0x8000)
-                    if alt_down:
-                        # Schedule on Qt thread to avoid reentrancy issues
+                vk = kb.vkCode
+                alt_down = bool(user32.GetAsyncKeyState(VK_MENU) & 0x8000)
+
+                if vk == VK_TAB and alt_down:
+                    shift_down = bool(user32.GetAsyncKeyState(0x10) & 0x8000)
+                    if shift_down:
+                        QTimer.singleShot(0, self._on_shift_tab)
+                    else:
                         QTimer.singleShot(0, self._on_hotkey_triggered)
-                        return 1  # suppress the keystroke
+                    return 1
+
+                if self.isVisible():
+                    if vk == VK_UP:
+                        QTimer.singleShot(0, self._select_prev)
+                        return 1
+                    if vk == VK_DOWN:
+                        QTimer.singleShot(0, self._select_next)
+                        return 1
+                    if vk == VK_RETURN:
+                        QTimer.singleShot(0, lambda: self._dismiss(switch=True))
+                        return 1
+                    if vk == VK_ESCAPE:
+                        QTimer.singleShot(0, lambda: self._dismiss(switch=False))
+                        return 1
+
             return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
         self._hook_proc = HOOKPROC(_hook_proc)
@@ -493,10 +517,14 @@ class SwitcherWindow(QWidget):
     # -- Show / populate / hide ----------------------------------------------
 
     def _on_hotkey_triggered(self) -> None:
-        """Called when Alt+Tab is pressed globally."""
         if self.isVisible():
-            # Already open: cycle to next
             self._select_next()
+        else:
+            self._populate_and_show()
+
+    def _on_shift_tab(self) -> None:
+        if self.isVisible():
+            self._select_prev()
         else:
             self._populate_and_show()
 
