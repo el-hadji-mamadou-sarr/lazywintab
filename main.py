@@ -86,6 +86,8 @@ user32.DestroyIcon.argtypes = [wintypes.HICON]
 user32.DestroyIcon.restype = wintypes.BOOL
 user32.GetAsyncKeyState.argtypes = [c_int]
 user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
 user32.SetWindowsHookExW.argtypes = [c_int, ctypes.c_void_p, wintypes.HINSTANCE, wintypes.DWORD]
 user32.SetWindowsHookExW.restype = ctypes.c_void_p
 user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
@@ -400,13 +402,15 @@ def _format_title(raw_title: str, proc: str) -> tuple[str, str]:
 
 
 class WindowItemWidget(QWidget):
-    """Two-line list item: bold app name + dimmer doc title."""
+    """Two-line list item: bold app name + dimmer doc title + close button."""
+
+    close_clicked = None  # set externally after construction
 
     def __init__(self, app: str, doc: str, parent=None):
         super().__init__(parent)
         from PyQt6.QtWidgets import QVBoxLayout as _VBox
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setContentsMargins(14, 8, 8, 8)
         layout.setSpacing(0)
 
         text_col = _VBox()
@@ -432,6 +436,21 @@ class WindowItemWidget(QWidget):
             text_col.addWidget(doc_label)
 
         layout.addLayout(text_col, 1)
+
+        self._close_btn = QLabel("✕")
+        self._close_btn.setFont(QFont("Segoe UI", 10))
+        self._close_btn.setStyleSheet(
+            "color: rgba(180,180,190,120); background: transparent; padding: 0 6px;"
+        )
+        self._close_btn.setFixedWidth(28)
+        self._close_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.mousePressEvent = self._on_close_press
+        layout.addWidget(self._close_btn)
+
+    def _on_close_press(self, event) -> None:
+        if self.close_clicked:
+            self.close_clicked()
 
 
 class SwitcherWindow(QWidget):
@@ -505,6 +524,7 @@ class SwitcherWindow(QWidget):
         VK_DOWN = 0x28
         VK_RETURN = 0x0D
         VK_ESCAPE = 0x1B
+        VK_DELETE = 0x2E
 
         WM_KEYUP = 0x0101
         WM_SYSKEYUP = 0x0105
@@ -545,6 +565,9 @@ class SwitcherWindow(QWidget):
                         return 1
                     if vk == VK_ESCAPE:
                         QTimer.singleShot(0, lambda: self._dismiss(switch=False))
+                        return 1
+                    if vk == VK_DELETE:
+                        QTimer.singleShot(0, self._close_selected)
                         return 1
 
             return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
@@ -609,12 +632,13 @@ class SwitcherWindow(QWidget):
             return
 
         self._list.clear()
-        for hwnd, title, proc in self._windows:
+        for idx, (hwnd, title, proc) in enumerate(self._windows):
             app, doc = _format_title(title, proc)
             item = QListWidgetItem()
             item.setSizeHint(QSize(WINDOW_WIDTH - 20, ITEM_HEIGHT))
             self._list.addItem(item)
             widget = WindowItemWidget(app, doc)
+            widget.close_clicked = lambda i=idx: self._close_window_at(i)
             self._list.setItemWidget(item, widget)
 
         # Select the second item (first is usually the current window)
@@ -662,6 +686,28 @@ class SwitcherWindow(QWidget):
         row = self._list.currentRow()
         new_row = (row - 1) % self._list.count()
         self._list.setCurrentRow(new_row)
+
+    def _close_window_at(self, idx: int) -> None:
+        """Close the window at the given list index and remove it from the switcher."""
+        if not (0 <= idx < len(self._windows)):
+            return
+        hwnd = self._windows[idx][0]
+        user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        self._windows.pop(idx)
+        self._list.takeItem(idx)
+        if not self._windows:
+            self._dismiss(switch=False)
+            return
+        # Update close_clicked callbacks (indices shifted after removal)
+        for i in range(self._list.count()):
+            w = self._list.itemWidget(self._list.item(i))
+            if w:
+                w.close_clicked = lambda j=i: self._close_window_at(j)
+        new_row = min(idx, self._list.count() - 1)
+        self._list.setCurrentRow(new_row)
+
+    def _close_selected(self) -> None:
+        self._close_window_at(self._list.currentRow())
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         self._dismiss(switch=True)
