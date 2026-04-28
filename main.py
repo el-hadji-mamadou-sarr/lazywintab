@@ -451,7 +451,14 @@ class SwitcherWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        # Hide from taskbar by applying WS_EX_TOOLWINDOW after the native handle exists
+        GWL_EXSTYLE_SET = -20
+        QTimer.singleShot(0, lambda: user32.SetWindowLongW(
+            int(self.winId()), GWL_EXSTYLE_SET,
+            user32.GetWindowLongW(int(self.winId()), GWL_EXSTYLE_SET) | WS_EX_TOOLWINDOW
+        ))
 
         # Layout
         root_layout = QVBoxLayout(self)
