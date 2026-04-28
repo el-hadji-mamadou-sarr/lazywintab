@@ -635,8 +635,6 @@ class SwitcherWindow(QWidget):
             self.move(x, y)
 
         self.show()
-        self.activateWindow()
-        self.raise_()
 
         # Delay poll start to avoid false Alt-release detection right after hook fires
         QTimer.singleShot(200, self._poll_timer.start)
