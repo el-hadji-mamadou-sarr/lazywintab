@@ -94,8 +94,10 @@ user32.CallNextHookEx.argtypes = [ctypes.c_void_p, c_int, wintypes.WPARAM, winty
 user32.CallNextHookEx.restype = ctypes.c_long
 
 WH_KEYBOARD_LL = 13
+WH_MOUSE_LL = 14
 WM_KEYDOWN = 0x0100
 WM_SYSKEYDOWN = 0x0104
+WM_MOUSEWHEEL = 0x020A
 
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
@@ -109,6 +111,16 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
 
 
 wintypes.KBDLLHOOKSTRUCT = KBDLLHOOKSTRUCT
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", wintypes.POINT),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
 
 ENUMWINDOWSPROC = WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -464,6 +476,7 @@ class SwitcherWindow(QWidget):
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.installEventFilter(self)
         inner.addWidget(self._list)
 
         self.setStyleSheet(STYLESHEET)
@@ -471,6 +484,8 @@ class SwitcherWindow(QWidget):
 
         self._hook = None
         self._hook_proc = None  # keep reference to prevent GC
+        self._mouse_hook = None
+        self._mouse_hook_proc = None
         self._install_hook()
 
     # -- Low-level keyboard hook ---------------------------------------------
@@ -534,11 +549,33 @@ class SwitcherWindow(QWidget):
         else:
             log.error("Failed to install keyboard hook (error=%s).", ctypes.GetLastError())
 
+        def _mouse_proc(nCode, wParam, lParam):
+            if nCode >= 0 and wParam == WM_MOUSEWHEEL and self.isVisible():
+                ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                # High word of mouseData is the wheel delta (signed)
+                delta = ctypes.c_short((ms.mouseData >> 16) & 0xFFFF).value
+                if delta < 0:
+                    QTimer.singleShot(0, self._select_next)
+                elif delta > 0:
+                    QTimer.singleShot(0, self._select_prev)
+            return user32.CallNextHookEx(self._mouse_hook, nCode, wParam, lParam)
+
+        self._mouse_hook_proc = HOOKPROC(_mouse_proc)
+        self._mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._mouse_hook_proc, None, 0)
+        if self._mouse_hook:
+            log.info("Low-level mouse hook installed.")
+        else:
+            log.error("Failed to install mouse hook (error=%s).", ctypes.GetLastError())
+
     def _remove_hook(self) -> None:
         if self._hook:
             user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
             log.info("Keyboard hook removed.")
+        if self._mouse_hook:
+            user32.UnhookWindowsHookEx(self._mouse_hook)
+            self._mouse_hook = None
+            log.info("Mouse hook removed.")
 
     # -- Show / populate / hide ----------------------------------------------
 
@@ -623,6 +660,27 @@ class SwitcherWindow(QWidget):
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         self._dismiss(switch=True)
+
+    # -- Scroll wheel navigation ---------------------------------------------
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y()
+        if delta < 0:
+            self._select_next()
+        elif delta > 0:
+            self._select_prev()
+        event.accept()
+
+    def eventFilter(self, obj, event) -> bool:
+        from PyQt6.QtCore import QEvent
+        if obj is self._list and event.type() == QEvent.Type.Wheel:
+            delta = event.angleDelta().y()
+            if delta < 0:
+                self._select_next()
+            elif delta > 0:
+                self._select_prev()
+            return True  # consume — don't scroll the list view
+        return super().eventFilter(obj, event)
 
     # -- Poll Alt release (triggers switch) ----------------------------------
 
