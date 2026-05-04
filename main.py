@@ -10,9 +10,11 @@ Usage:
 """
 
 import sys
+import os
 import ctypes
 import ctypes.wintypes as wintypes
 import logging
+import winreg
 from ctypes import POINTER, WINFUNCTYPE, byref, sizeof, c_int, windll
 
 from PyQt6.QtCore import Qt, QSize, QTimer, QRect
@@ -773,16 +775,165 @@ class SwitcherWindow(QWidget):
 # Main
 # ---------------------------------------------------------------------------
 
+_AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_NAME = "LazyWinTab"
+
+
+def _get_exe_path() -> str:
+    """Return the path to use for the autostart entry (exe or python script)."""
+    if getattr(sys, "frozen", False):
+        return sys.executable  # PyInstaller exe
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+
+def _is_autostart_enabled() -> bool:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY) as key:
+            winreg.QueryValueEx(key, _AUTOSTART_NAME)
+            return True
+    except FileNotFoundError:
+        return False
+
+
+def _set_autostart(enable: bool) -> None:
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY, access=winreg.KEY_SET_VALUE) as key:
+        if enable:
+            winreg.SetValueEx(key, _AUTOSTART_NAME, 0, winreg.REG_SZ, _get_exe_path())
+            log.info("Autostart enabled.")
+        else:
+            try:
+                winreg.DeleteValue(key, _AUTOSTART_NAME)
+                log.info("Autostart disabled.")
+            except FileNotFoundError:
+                pass
+
+
+INSTALL_STYLESHEET = """
+QWidget#InstallerBg {
+    background-color: #16161c;
+    border: 1px solid rgba(255,255,255,18);
+    border-radius: 16px;
+}
+QLabel#Title {
+    color: #f0f0f0;
+    font-size: 15px;
+    font-weight: 600;
+}
+QLabel#Sub {
+    color: rgba(160,160,170,200);
+    font-size: 10px;
+}
+QLabel#Done {
+    color: #69f0ae;
+    font-size: 11px;
+    font-weight: 600;
+}
+QProgressBar {
+    background: rgba(255,255,255,15);
+    border: none;
+    border-radius: 4px;
+    height: 8px;
+}
+QProgressBar::chunk {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #7850dc,stop:1 #4fc3f7);
+    border-radius: 4px;
+}
+"""
+
+
+class InstallerWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setObjectName("InstallerBg")
+        self.setFixedSize(360, 160)
+
+        from PyQt6.QtWidgets import QProgressBar
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        bg = QWidget()
+        bg.setObjectName("InstallerBg")
+        outer.addWidget(bg)
+
+        lay = QVBoxLayout(bg)
+        lay.setContentsMargins(28, 24, 28, 24)
+        lay.setSpacing(10)
+
+        title = QLabel("Installing LazyWinTab")
+        title.setObjectName("Title")
+        title.setFont(QFont("Segoe UI", 13, QFont.Weight.DemiBold))
+        lay.addWidget(title)
+
+        self._sub = QLabel("Setting up autostart…")
+        self._sub.setObjectName("Sub")
+        self._sub.setFont(QFont("Segoe UI", 9))
+        lay.addWidget(self._sub)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(8)
+        lay.addWidget(self._bar)
+
+        self._done_label = QLabel("")
+        self._done_label.setObjectName("Done")
+        self._done_label.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        self._done_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._done_label)
+
+        self.setStyleSheet(INSTALL_STYLESHEET)
+
+        # Center on screen
+        screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.geometry()
+            self.move((geo.width() - self.width()) // 2, (geo.height() - self.height()) // 2)
+
+        self._step = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self._tick)
+        QTimer.singleShot(200, self._timer.start)
+
+    def _tick(self):
+        self._step += 2
+        self._bar.setValue(min(self._step, 100))
+
+        if self._step == 40:
+            self._sub.setText("Writing registry entry…")
+        elif self._step == 70:
+            _set_autostart(True)
+            self._sub.setText("Finalizing…")
+        elif self._step >= 100:
+            self._timer.stop()
+            self._bar.setValue(100)
+            self._sub.setText("")
+            self._done_label.setText("LazyWinTab installed! Starts with Windows.")
+            QTimer.singleShot(2200, self.close)
+
+
 def main():
-    print("Starting LazyWinTab...", flush=True)
+    is_install = "--install" in sys.argv or not _is_autostart_enabled()
+
     app = QApplication(sys.argv)
-    print("QApplication created", flush=True)
     app.setQuitOnLastWindowClosed(False)
+
+    if is_install:
+        installer = InstallerWindow()
+        installer.show()
+        # After installer closes, continue to run normally
+        installer.destroyed.connect(lambda: None)  # keep ref
 
     try:
         switcher = SwitcherWindow()
-        print("SwitcherWindow created", flush=True)
-    except Exception as e:
+    except Exception:
         import traceback
         traceback.print_exc()
         input("Press Enter to exit")
@@ -792,6 +943,17 @@ def main():
     tray = QSystemTrayIcon(app)
     tray.setIcon(app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon))
     tray_menu = QMenu()
+
+    autostart_action = tray_menu.addAction("Run on startup")
+    autostart_action.setCheckable(True)
+    autostart_action.setChecked(_is_autostart_enabled())
+
+    def _toggle_autostart(checked: bool):
+        _set_autostart(checked)
+
+    autostart_action.toggled.connect(_toggle_autostart)
+
+    tray_menu.addSeparator()
     quit_action = tray_menu.addAction("Quit LazyWinTab")
     quit_action.triggered.connect(app.quit)
     tray.setContextMenu(tray_menu)
