@@ -11,6 +11,9 @@ Usage:
 
 import sys
 import os
+import json
+import pathlib
+import subprocess
 import ctypes
 import ctypes.wintypes as wintypes
 import logging
@@ -408,7 +411,7 @@ class WindowItemWidget(QWidget):
 
     close_clicked = None  # set externally after construction
 
-    def __init__(self, app: str, doc: str, parent=None):
+    def __init__(self, app: str, doc: str, app_color: str | None = None, parent=None):
         super().__init__(parent)
         from PyQt6.QtWidgets import QVBoxLayout as _VBox
         layout = QHBoxLayout(self)
@@ -418,9 +421,10 @@ class WindowItemWidget(QWidget):
         text_col = _VBox()
         text_col.setSpacing(2)
 
-        is_vscode = app == "Visual Studio Code"
-        app_color = "#4fc3f7" if is_vscode else "#f0f0f0"
-        app_size = 13 if is_vscode else 11
+        # Use custom color if provided, else fall back to built-in defaults
+        if app_color is None:
+            app_color = "#4fc3f7" if app == "Visual Studio Code" else "#f0f0f0"
+        app_size = 11
 
         app_label = QLabel(app)
         app_label.setFont(QFont("Segoe UI", app_size, QFont.Weight.DemiBold))
@@ -429,11 +433,9 @@ class WindowItemWidget(QWidget):
         text_col.addWidget(app_label)
 
         if doc:
-            doc_color = "#80cbc4" if is_vscode else "rgba(180, 180, 190, 200)"
-            doc_size = 10 if is_vscode else 9
             doc_label = QLabel(doc)
-            doc_label.setFont(QFont("Segoe UI", doc_size))
-            doc_label.setStyleSheet(f"color: {doc_color}; background: transparent;")
+            doc_label.setFont(QFont("Segoe UI", 9))
+            doc_label.setStyleSheet("color: rgba(180, 180, 190, 200); background: transparent;")
             doc_label.setWordWrap(False)
             text_col.addWidget(doc_label)
 
@@ -634,12 +636,14 @@ class SwitcherWindow(QWidget):
             return
 
         self._list.clear()
+        colors = _load_colors()
         for idx, (hwnd, title, proc) in enumerate(self._windows):
             app, doc = _format_title(title, proc)
+            app_color = colors.get(app) or colors.get(proc) or None
             item = QListWidgetItem()
             item.setSizeHint(QSize(WINDOW_WIDTH - 20, ITEM_HEIGHT))
             self._list.addItem(item)
-            widget = WindowItemWidget(app, doc)
+            widget = WindowItemWidget(app, doc, app_color)
             widget.close_clicked = lambda i=idx: self._close_window_at(i)
             self._list.setItemWidget(item, widget)
 
@@ -777,6 +781,39 @@ class SwitcherWindow(QWidget):
 
 _AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _AUTOSTART_NAME = "LazyWinTab"
+
+_DEFAULT_COLORS: dict[str, str] = {
+    "Visual Studio Code": "#4fc3f7",
+}
+
+
+def _config_path() -> pathlib.Path:
+    d = pathlib.Path(os.environ["APPDATA"]) / "LazyWinTab"
+    d.mkdir(exist_ok=True)
+    return d / "colors.json"
+
+
+def _load_colors() -> dict[str, str]:
+    try:
+        return json.loads(_config_path().read_text(encoding="utf-8"))
+    except Exception:
+        return dict(_DEFAULT_COLORS)
+
+
+def _settings_exe() -> list[str]:
+    """Return the command to launch the settings app."""
+    if getattr(sys, "frozen", False):
+        exe = pathlib.Path(sys.executable).parent / "LazyWinTabSettings.exe"
+        return [str(exe)]
+    return [sys.executable, str(pathlib.Path(__file__).parent / "settings.py")]
+
+
+def _uninstall_exe() -> list[str]:
+    """Return the command to launch the uninstaller."""
+    if getattr(sys, "frozen", False):
+        exe = pathlib.Path(sys.executable).parent / "LazyWinTabUninstall.exe"
+        return [str(exe)]
+    return [sys.executable, str(pathlib.Path(__file__).parent / "uninstall.py")]
 
 
 def _get_exe_path() -> str:
@@ -943,6 +980,12 @@ def main():
     tray = QSystemTrayIcon(app)
     tray.setIcon(app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon))
     tray_menu = QMenu()
+
+    settings_action = tray_menu.addAction("Settings…")
+    settings_action.triggered.connect(lambda: subprocess.Popen(_settings_exe()))
+
+    uninstall_action = tray_menu.addAction("Uninstall…")
+    uninstall_action.triggered.connect(lambda: subprocess.Popen(_uninstall_exe()))
 
     autostart_action = tray_menu.addAction("Run on startup")
     autostart_action.setCheckable(True)
